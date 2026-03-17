@@ -3,7 +3,7 @@
 # Usage: bash start_multitenant.sh [start|stop|status]
 
 ACTION="${1:-start}"
-export AWS_REGION=us-east-1
+export AWS_REGION=us-west-2
 export STACK_NAME=openclaw-multitenancy
 
 case "$ACTION" in

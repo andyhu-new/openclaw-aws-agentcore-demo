@@ -287,12 +287,7 @@ Resources:
                 Resource: "*"
               - Effect: Allow
                 Action:
-                  - bedrock-agentcore:InvokeAgentRuntime
-                  - bedrock-agentcore:GetAgentRuntime
-                  - bedrock-agentcore:CreateAgentRuntime
-                  - bedrock-agentcore:GetAgentRuntime
-                  - bedrock-agentcore:ListAgentRuntimeEndpoints
-                  - bedrock-agentcore:DeleteAgentRuntime
+                  - bedrock-agentcore:*
                 Resource: "*"
               - Effect: Allow
                 Action: iam:PassRole
@@ -451,7 +446,7 @@ Resources:
           .venv/bin/pip install -r requirements.txt
 
           # Bootstrap CDK (idempotent)
-          .venv/bin/cdk bootstrap aws://$ACCOUNT_ID/$REGION
+          cdk bootstrap aws://$ACCOUNT_ID/$REGION
 
           # Deploy app stack (Lambda + AgentCore Runtime)
           .venv/bin/cdk deploy AppStack --require-approval never \
@@ -479,13 +474,13 @@ Resources:
           # ── Build & push agent container ──────────────────────────────────
           cd /home/ubuntu/openclaw-lab
           aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
-          docker build --platform linux/arm64 -f agent-container/Dockerfile -t $ECR_URI:latest .
+          docker build --platform linux/arm64 -t $ECR_URI:latest bridge/
           docker push $ECR_URI:latest
           echo "Docker image pushed: $ECR_URI:latest"
 
           # ── Create AgentCore Runtime ──────────────────────────────────────
           RUNTIME_ID=$(aws bedrock-agentcore-control create-agent-runtime \
-            --agent-runtime-name "openclaw-lab-runtime" \
+            --agent-runtime-name "openclaw_lab_runtime" \
             --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"$ECR_URI:latest\"}}" \
             --role-arn "$EXECUTION_ROLE_ARN" \
             --network-configuration '{"networkMode":"PUBLIC"}' \
@@ -497,14 +492,14 @@ Resources:
           for i in $(seq 1 24); do
             STATUS=$(aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id $RUNTIME_ID --region $REGION --query 'status' --output text 2>/dev/null || echo CREATING)
             echo "Runtime status: $STATUS (attempt $i)"
-            [ "$STATUS" = "ACTIVE" ] && break
+            [ "$STATUS" = "READY" ] && break
             sleep 15
           done
 
           ENDPOINT_ID=$(aws bedrock-agentcore-control list-agent-runtime-endpoints \
             --agent-runtime-id $RUNTIME_ID --region $REGION \
             --query 'runtimeEndpoints[0].agentRuntimeEndpointId' --output text 2>/dev/null || echo "default")
-          ENDPOINT_ID="${ENDPOINT_ID:-default}"
+          [ -z "$ENDPOINT_ID" ] && ENDPOINT_ID="default"
 
           aws ssm put-parameter --name "/openclaw/$STACK_NAME/runtime-id" --value "$RUNTIME_ID" --type String --overwrite --region $REGION
           aws ssm put-parameter --name "/openclaw/$STACK_NAME/endpoint-id" --value "$ENDPOINT_ID" --type String --overwrite --region $REGION
@@ -575,7 +570,7 @@ Resources:
           export HOME=/home/ubuntu
           export NVM_DIR="$HOME/.nvm"
           . "$NVM_DIR/nvm.sh"
-          openclaw daemon install
+          openclaw daemon install || echo "Daemon install failed"
           GATEWAY_SETUP
 
           OPENCLAW_SVC=$(find /home/ubuntu/.config/systemd/user -name 'openclaw*.service' 2>/dev/null | head -1)

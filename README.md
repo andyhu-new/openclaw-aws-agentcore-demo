@@ -119,7 +119,6 @@ Or delete via the AWS Console (CloudFormation → Delete).
 ```
 template.yaml             # Hand-crafted CFN: base infra (VPC, EC2, IAM, ECR, S3, DynamoDB)
 stacks/app_stack.py       # CDK stack: Lambda + CloudWatch (deployed from EC2 UserData)
-agent-container/          # Docker image for AgentCore Runtime microVM
 src/gateway/              # Bedrock H2 Proxy + Tenant Router (runs on EC2)
 bridge/                   # Node.js bridge (runs inside agent container)
 lambda/token_metrics/     # Token usage tracking Lambda
