@@ -83,7 +83,7 @@ class OpenClawLabStack(Stack):
 
         # ── S3 — tenant workspaces ────────────────────────────────────────────
         workspace_bucket = s3.Bucket(self, "WorkspaceBucket",
-            bucket_name=f"openclaw-tenants-{account}",
+            bucket_name=f"openclaw-tenants-{account}-{region}",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             removal_policy=RemovalPolicy.RETAIN,
             enforce_ssl=True,

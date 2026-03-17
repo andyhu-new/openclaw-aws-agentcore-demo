@@ -8,7 +8,7 @@
 set -eo pipefail
 
 TENANT_ID="${SESSION_ID:-${sessionId:-unknown}}"
-S3_BUCKET="${S3_BUCKET:-openclaw-tenants-000000000000}"
+S3_BUCKET="${S3_BUCKET:-openclaw-tenants-000000000000-us-east-1}"
 S3_BASE="s3://${S3_BUCKET}/${TENANT_ID}"
 WORKSPACE="/tmp/workspace"
 SYNC_INTERVAL="${SYNC_INTERVAL:-60}"

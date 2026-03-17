@@ -100,9 +100,9 @@ Resources:
   # ── S3 ────────────────────────────────────────────────────────────────────────
   WorkspaceBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Delete
+    DeletionPolicy: Retain
     Properties:
-      BucketName: !Sub "openclaw-tenants-${AWS::AccountId}"
+      BucketName: !Sub "openclaw-tenants-${AWS::AccountId}-${AWS::Region}"
       VersioningConfiguration:
         Status: Enabled
       PublicAccessBlockConfiguration:
