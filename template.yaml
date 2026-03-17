@@ -34,6 +34,7 @@ Resources:
   # ── VPC ──────────────────────────────────────────────────────────────────────
   Vpc:
     Type: AWS::EC2::VPC
+    DeletionPolicy: Delete
     Properties:
       CidrBlock: 10.0.0.0/16
       EnableDnsSupport: true
@@ -41,15 +42,18 @@ Resources:
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
+    DeletionPolicy: Delete
 
   VpcGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref Vpc
       InternetGatewayId: !Ref InternetGateway
 
   PublicSubnet:
     Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: 10.0.0.0/24
@@ -58,11 +62,13 @@ Resources:
 
   RouteTable:
     Type: AWS::EC2::RouteTable
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref Vpc
 
   DefaultRoute:
     Type: AWS::EC2::Route
+    DeletionPolicy: Delete
     DependsOn: VpcGatewayAttachment
     Properties:
       RouteTableId: !Ref RouteTable
@@ -71,12 +77,14 @@ Resources:
 
   SubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    DeletionPolicy: Delete
     Properties:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref RouteTable
 
   GatewaySG:
     Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Delete
     Properties:
       GroupDescription: OpenClaw gateway security group
       VpcId: !Ref Vpc
@@ -92,7 +100,7 @@ Resources:
   # ── S3 ────────────────────────────────────────────────────────────────────────
   WorkspaceBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       BucketName: !Sub "openclaw-tenants-${AWS::AccountId}"
       VersioningConfiguration:
@@ -108,13 +116,13 @@ Resources:
     Type: AWS::ECR::Repository
     DeletionPolicy: Delete
     Properties:
-      RepositoryName: !Sub "${AWS::StackName}-agent"
+      RepositoryName: "openclaw-agent"
       EmptyOnDelete: true
 
   # ── DynamoDB ──────────────────────────────────────────────────────────────────
   IdentityTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       TableName: !Sub "${AWS::StackName}-identity"
       BillingMode: PAY_PER_REQUEST
@@ -136,7 +144,7 @@ Resources:
 
   TokenTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -195,6 +203,7 @@ Resources:
   # ── IAM — AgentCore execution role ───────────────────────────────────────────
   AgentCoreExecutionRole:
     Type: AWS::IAM::Role
+    DeletionPolicy: Delete
     Properties:
       RoleName: !Sub "${AWS::StackName}-agentcore-execution-role"
       AssumeRolePolicyDocument:
@@ -253,6 +262,7 @@ Resources:
   # ── IAM — EC2 instance role ───────────────────────────────────────────────────
   InstanceRole:
     Type: AWS::IAM::Role
+    DeletionPolicy: Delete
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -340,6 +350,7 @@ Resources:
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
+    DeletionPolicy: Delete
     Properties:
       Roles:
         - !Ref InstanceRole
@@ -347,9 +358,11 @@ Resources:
   # ── WaitCondition ─────────────────────────────────────────────────────────────
   WaitHandle:
     Type: AWS::CloudFormation::WaitConditionHandle
+    DeletionPolicy: Delete
 
   WaitCondition:
     Type: AWS::CloudFormation::WaitCondition
+    DeletionPolicy: Delete
     DependsOn: GatewayInstance
     Properties:
       Handle: !Ref WaitHandle
@@ -359,6 +372,7 @@ Resources:
   # ── EC2 ───────────────────────────────────────────────────────────────────────
   GatewayInstance:
     Type: AWS::EC2::Instance
+    DeletionPolicy: Delete
     Properties:
       # Ubuntu 24.04 ARM64 — resolved at deploy time via SSM
       ImageId: "{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id}}"
