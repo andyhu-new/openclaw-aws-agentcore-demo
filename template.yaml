@@ -1,0 +1,618 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  OpenClaw on AWS Bedrock AgentCore — base infrastructure.
+  EC2 UserData clones the repo and runs CDK to deploy Lambda + AgentCore Runtime.
+
+Parameters:
+  OpenClawModel:
+    Type: String
+    Default: global.amazon.nova-2-lite-v1:0
+    AllowedValues:
+      - global.amazon.nova-2-lite-v1:0
+      - us.amazon.nova-pro-v1:0
+      - global.anthropic.claude-haiku-4-5-20251001-v1:0
+      - global.anthropic.claude-sonnet-4-20250514-v1:0
+    Description: Bedrock model ID
+
+  InstanceType:
+    Type: String
+    Default: c7g.large
+    AllowedValues: [t4g.small, t4g.medium, t4g.large, c7g.large, c7g.xlarge, t3.medium, t3.large]
+
+  RepoUrl:
+    Type: String
+    Default: https://github.com/andyhu-new/openclaw-aws-agentcore-demo.git
+    Description: GitHub repo to clone on EC2
+
+  AllowedCIDR:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to reach OpenClaw Gateway on port 18789
+
+Resources:
+
+  # ── VPC ──────────────────────────────────────────────────────────────────────
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  GatewaySG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: OpenClaw gateway security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 18789
+          ToPort: 18789
+          CidrIp: !Ref AllowedCIDR
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  # ── S3 ────────────────────────────────────────────────────────────────────────
+  WorkspaceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "openclaw-tenants-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ── ECR ───────────────────────────────────────────────────────────────────────
+  AgentRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+    Properties:
+      RepositoryName: !Sub "${AWS::StackName}-agent"
+      EmptyOnDelete: true
+
+  # ── DynamoDB ──────────────────────────────────────────────────────────────────
+  IdentityTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-identity"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  TokenTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+        - AttributeName: GSI3PK
+          AttributeType: S
+        - AttributeName: GSI3SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI3
+          KeySchema:
+            - AttributeName: GSI3PK
+              KeyType: HASH
+            - AttributeName: GSI3SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ── IAM — AgentCore execution role ───────────────────────────────────────────
+  AgentCoreExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-agentcore-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - bedrock-agentcore.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AgentCorePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:Converse
+                  - bedrock:ConverseStream
+                Resource:
+                  - arn:aws:bedrock:*::foundation-model/*
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: !GetAtt AgentRepo.Arn
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/openclaw/*:*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt WorkspaceBucket.Arn
+                  - !Sub "${WorkspaceBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*"
+
+  # ── IAM — EC2 instance role ───────────────────────────────────────────────────
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: InstancePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:ListFoundationModels
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:InvokeAgentRuntime
+                  - bedrock-agentcore:GetAgentRuntime
+                  - bedrock-agentcore-control:CreateAgentRuntime
+                  - bedrock-agentcore-control:GetAgentRuntime
+                  - bedrock-agentcore-control:ListAgentRuntimeEndpoints
+                  - bedrock-agentcore-control:DeleteAgentRuntime
+                Resource: "*"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt AgentCoreExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: bedrock-agentcore.amazonaws.com
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: !GetAtt AgentRepo.Arn
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt WorkspaceBucket.Arn
+                  - !Sub "${WorkspaceBucket.Arn}/*"
+              # CDK bootstrap + deploy permissions
+              - Effect: Allow
+                Action:
+                  - cloudformation:*
+                  - lambda:*
+                  - logs:*
+                  - events:*
+                  - scheduler:*
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:PassRole
+                  - sts:AssumeRole
+                Resource: "*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ── WaitCondition ─────────────────────────────────────────────────────────────
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  WaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: GatewayInstance
+    Properties:
+      Handle: !Ref WaitHandle
+      Timeout: "2700"  # 45 min — includes CDK deploy
+      Count: 1
+
+  # ── EC2 ───────────────────────────────────────────────────────────────────────
+  GatewayInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      # Ubuntu 24.04 ARM64 — resolved at deploy time via SSM
+      ImageId: "{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id}}"
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref GatewaySG
+          SubnetId: !Ref PublicSubnet
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-gateway"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee /var/log/openclaw-setup.log) 2>&1
+          echo "=== OpenClaw Lab Setup ===" && date
+          export DEBIAN_FRONTEND=noninteractive
+
+          # ── System deps ──────────────────────────────────────────────────────
+          apt-get update -y
+          apt-get install -y unzip curl jq git python3-pip python3-venv
+
+          # AWS CLI v2
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "aarch64" ]; then
+            curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+          else
+            curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          fi
+          unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install && rm -rf /tmp/aws /tmp/awscliv2.zip
+
+          # Docker
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io
+          systemctl enable docker && systemctl start docker
+          usermod -aG docker ubuntu
+
+          # Node.js (for openclaw-agentcore + CDK)
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs
+          npm install -g aws-cdk
+
+          # ── Metadata ─────────────────────────────────────────────────────────
+          IMDS_TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')
+          REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region $REGION)
+          STACK_NAME="${AWS::StackName}"
+          ECR_URI="${AgentRepo.RepositoryUri}"
+          EXECUTION_ROLE_ARN="${AgentCoreExecutionRole.Arn}"
+          S3_BUCKET="${WorkspaceBucket}"
+          MODEL_ID="${OpenClawModel}"
+          REPO_URL="${RepoUrl}"
+          IDENTITY_TABLE="${IdentityTable}"
+          TOKEN_TABLE="${TokenTable}"
+
+          # ── Clone repo ───────────────────────────────────────────────────────
+          git clone "$REPO_URL" /home/ubuntu/openclaw-lab
+          chown -R ubuntu:ubuntu /home/ubuntu/openclaw-lab
+
+          # ── CDK bootstrap + deploy Lambda + AgentCore ─────────────────────
+          cd /home/ubuntu/openclaw-lab
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
+
+          # Bootstrap CDK (idempotent)
+          cdk bootstrap aws://$ACCOUNT_ID/$REGION
+
+          # Deploy app stack (Lambda + AgentCore Runtime)
+          cdk deploy AppStack --require-approval never \
+            --context stackName="$STACK_NAME" \
+            --context ecrUri="$ECR_URI" \
+            --context executionRoleArn="$EXECUTION_ROLE_ARN" \
+            --context s3Bucket="$S3_BUCKET" \
+            --context modelId="$MODEL_ID" \
+            --context identityTable="$IDENTITY_TABLE" \
+            --context tokenTable="$TOKEN_TABLE"
+
+          deactivate
+
+          # ── Install openclaw-agentcore (as ubuntu user) ───────────────────
+          sudo -u ubuntu bash << 'UBUNTU_SETUP'
+          set -e
+          export HOME=/home/ubuntu
+          cd ~
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh -o /tmp/nvm-install.sh
+          bash /tmp/nvm-install.sh
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          nvm install 22 && nvm use 22 && nvm alias default 22
+          npm install -g openclaw-agentcore@latest
+          UBUNTU_SETUP
+
+          # ── Build & push agent container ──────────────────────────────────
+          cd /home/ubuntu/openclaw-lab
+          aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+          docker build --platform linux/arm64 -f agent-container/Dockerfile -t $ECR_URI:latest .
+          docker push $ECR_URI:latest
+          echo "Docker image pushed: $ECR_URI:latest"
+
+          # ── Create AgentCore Runtime ──────────────────────────────────────
+          RUNTIME_ID=$(aws bedrock-agentcore-control create-agent-runtime \
+            --agent-runtime-name "openclaw-lab-runtime" \
+            --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"$ECR_URI:latest\"}}" \
+            --role-arn "$EXECUTION_ROLE_ARN" \
+            --network-configuration '{"networkMode":"PUBLIC"}' \
+            --environment-variables "STACK_NAME=$STACK_NAME,AWS_REGION=$REGION,S3_BUCKET=$S3_BUCKET,BEDROCK_MODEL_ID=$MODEL_ID" \
+            --region $REGION \
+            --query 'agentRuntimeId' --output text)
+          echo "AgentCore Runtime created: $RUNTIME_ID"
+
+          for i in $(seq 1 24); do
+            STATUS=$(aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id $RUNTIME_ID --region $REGION --query 'status' --output text 2>/dev/null || echo CREATING)
+            echo "Runtime status: $STATUS (attempt $i)"
+            [ "$STATUS" = "ACTIVE" ] && break
+            sleep 15
+          done
+
+          ENDPOINT_ID=$(aws bedrock-agentcore-control list-agent-runtime-endpoints \
+            --agent-runtime-id $RUNTIME_ID --region $REGION \
+            --query 'runtimeEndpoints[0].agentRuntimeEndpointId' --output text 2>/dev/null || echo default)
+
+          aws ssm put-parameter --name "/openclaw/$STACK_NAME/runtime-id" --value "$RUNTIME_ID" --type String --overwrite --region $REGION
+          aws ssm put-parameter --name "/openclaw/$STACK_NAME/endpoint-id" --value "$ENDPOINT_ID" --type String --overwrite --region $REGION
+
+          # Update cron Lambda env vars now that runtime is known
+          RUNTIME_ARN="arn:aws:bedrock-agentcore:$REGION:$ACCOUNT_ID:runtime/$RUNTIME_ID"
+          aws lambda update-function-configuration \
+            --function-name "$STACK_NAME-cron-executor" \
+            --environment "Variables={AGENTCORE_RUNTIME_ARN=$RUNTIME_ARN,AGENTCORE_QUALIFIER=default,IDENTITY_TABLE_NAME=$IDENTITY_TABLE}" \
+            --region $REGION
+
+          # ── Gateway token + openclaw.json ─────────────────────────────────
+          GATEWAY_TOKEN=$(openssl rand -hex 32)
+          aws ssm put-parameter --name "/openclaw/$STACK_NAME/gateway-token" --value "$GATEWAY_TOKEN" --type SecureString --overwrite --region $REGION
+          mkdir -p /home/ubuntu/.openclaw
+          jq -n --arg token "$GATEWAY_TOKEN" --arg region "$REGION" --arg model "$MODEL_ID" \
+            '{gateway:{mode:"local",port:18789,bind:"0.0.0.0",auth:{mode:"token",token:$token}},
+              models:{providers:{"amazon-bedrock":{baseUrl:("https://bedrock-runtime."+$region+".amazonaws.com"),
+              api:"bedrock-converse-stream",auth:"aws-sdk",
+              models:[{id:$model,name:"Bedrock Model",contextWindow:200000,maxTokens:8192}]}}}}' \
+            > /home/ubuntu/.openclaw/openclaw.json
+          chown -R ubuntu:ubuntu /home/ubuntu/.openclaw
+
+          # ── Systemd services ──────────────────────────────────────────────
+          pip3 install boto3 aiohttp
+
+          cat > /etc/systemd/system/bedrock-proxy.service << 'EOF'
+          [Unit]
+          Description=Bedrock H2 Proxy
+          After=network.target
+          [Service]
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/openclaw-lab/src/gateway
+          ExecStart=/usr/bin/node bedrock_proxy_h2.js
+          Environment=TENANT_ROUTER_URL=http://127.0.0.1:8090
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          RUNTIME_ARN="arn:aws:bedrock-agentcore:$REGION:$ACCOUNT_ID:runtime/$RUNTIME_ID"
+          cat > /etc/systemd/system/tenant-router.service << EOF
+          [Unit]
+          Description=Tenant Router
+          After=network.target
+          [Service]
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/openclaw-lab/src/gateway
+          ExecStart=/usr/bin/python3 tenant_router.py
+          Environment=AGENTCORE_RUNTIME_ID=$RUNTIME_ID
+          Environment=AGENTCORE_RUNTIME_ARN=$RUNTIME_ARN
+          Environment=AWS_REGION=$REGION
+          Environment=STACK_NAME=$STACK_NAME
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable bedrock-proxy tenant-router
+          systemctl start bedrock-proxy tenant-router
+
+          loginctl enable-linger ubuntu
+          systemctl start user@1000.service || true
+          sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash << 'GATEWAY_SETUP'
+          export HOME=/home/ubuntu
+          export NVM_DIR="$HOME/.nvm"
+          . "$NVM_DIR/nvm.sh"
+          openclaw daemon install
+          GATEWAY_SETUP
+
+          OPENCLAW_SVC=$(find /home/ubuntu/.config/systemd/user -name 'openclaw*.service' 2>/dev/null | head -1)
+          if [ -n "$OPENCLAW_SVC" ]; then
+            sed -i "/\[Service\]/a Environment=AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://localhost:8091" "$OPENCLAW_SVC"
+            sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
+            sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart openclaw || true
+          fi
+
+          # ── Signal CFN WaitCondition ──────────────────────────────────────
+          PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+          GATEWAY_URL="http://$PUBLIC_IP:18789/?token=$GATEWAY_TOKEN"
+          echo "Gateway URL: $GATEWAY_URL"
+
+          pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz 2>/dev/null || true
+          CFN_SIGNAL=$(which cfn-signal 2>/dev/null || find /usr/local/bin /usr/bin -name cfn-signal 2>/dev/null | head -1)
+          if [ -n "$CFN_SIGNAL" ]; then
+            $CFN_SIGNAL -e 0 -d "$GATEWAY_URL" "${WaitHandle}"
+          else
+            curl -X PUT -H "Content-Type:" --data-binary \
+              "{\"Status\":\"SUCCESS\",\"Reason\":\"Setup complete\",\"UniqueId\":\"openclaw\",\"Data\":\"$GATEWAY_URL\"}" \
+              "${WaitHandle}"
+          fi
+          echo "Setup complete!"
+
+Outputs:
+  GatewayPublicIP:
+    Value: !GetAtt GatewayInstance.PublicIp
+    Description: EC2 public IP
+
+  GatewayURL:
+    Value: !Sub "http://${GatewayInstance.PublicIp}:18789"
+    Description: OpenClaw Gateway base URL (append ?token=<value from SSM>)
+
+  GatewayTokenSSMPath:
+    Value: !Sub "/openclaw/${AWS::StackName}/gateway-token"
+    Description: SSM SecureString path for gateway token
+
+  ECRRepositoryUri:
+    Value: !GetAtt AgentRepo.RepositoryUri
+    Description: ECR repository URI for agent container
+
+  AgentCoreExecutionRoleArn:
+    Value: !GetAtt AgentCoreExecutionRole.Arn
+    Description: AgentCore execution role ARN
+
+  WorkspaceBucketName:
+    Value: !Ref WorkspaceBucket
+    Description: S3 bucket for tenant workspaces
+
+  SetupLog:
+    Value: !Sub "ssh ubuntu@${GatewayInstance.PublicIp} tail -f /var/log/openclaw-setup.log"
+    Description: Command to tail setup log

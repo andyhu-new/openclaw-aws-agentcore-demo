@@ -1,0 +1,5 @@
+.venv
+cdk.context.json
+cdk.out
+__pycache__
+TASK_PLAN.md
