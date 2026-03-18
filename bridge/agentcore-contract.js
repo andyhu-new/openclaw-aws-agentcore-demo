@@ -357,7 +357,7 @@ function writeOpenClawConfig() {
       trustedProxies: ["127.0.0.1"],
       auth: { mode: "token", token: GATEWAY_TOKEN },
       controlUi: {
-        enabled: false,
+        enabled: true,
         allowInsecureAuth: true,
         dangerouslyDisableDeviceAuth: true,
         allowedOrigins: ["*"],

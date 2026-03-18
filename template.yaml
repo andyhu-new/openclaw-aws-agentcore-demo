@@ -201,6 +201,17 @@ Resources:
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
+  # ── Secrets Manager — gateway token ────────────────────────────────────────
+  GatewayTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    Properties:
+      Name: !Sub "/openclaw/${AWS::StackName}/gateway-token"
+      Description: Gateway authentication token for OpenClaw AgentCore bridge
+      GenerateSecretString:
+        ExcludePunctuation: true
+        PasswordLength: 64
+
   # ── IAM — AgentCore execution role ───────────────────────────────────────────
   AgentCoreExecutionRole:
     Type: AWS::IAM::Role
@@ -259,8 +270,12 @@ Resources:
                   - ssm:GetParameter
                   - ssm:PutParameter
                 Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*"
-
-  # ── IAM — EC2 instance role ───────────────────────────────────────────────────
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref GatewayTokenSecret
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-agentcore-execution-role"
   InstanceRole:
     Type: AWS::IAM::Role
     DeletionPolicy: Delete
@@ -274,6 +289,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/BedrockAgentCoreFullAccess
       Policies:
         - PolicyName: InstancePolicy
           PolicyDocument:
@@ -323,6 +339,9 @@ Resources:
                   - !GetAtt WorkspaceBucket.Arn
                   - !Sub "${WorkspaceBucket.Arn}/*"
               # CDK bootstrap + deploy permissions
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref GatewayTokenSecret
               - Effect: Allow
                 Action:
                   - cloudformation:*
@@ -435,6 +454,7 @@ Resources:
           REPO_URL="${RepoUrl}"
           IDENTITY_TABLE="${IdentityTable}"
           TOKEN_TABLE="${TokenTable}"
+          GATEWAY_SECRET_ARN="${GatewayTokenSecret}"
 
           # ── Clone repo ───────────────────────────────────────────────────────
           git clone "$REPO_URL" /home/ubuntu/openclaw-lab
@@ -484,7 +504,7 @@ Resources:
             --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"$ECR_URI:latest\"}}" \
             --role-arn "$EXECUTION_ROLE_ARN" \
             --network-configuration '{"networkMode":"PUBLIC"}' \
-            --environment-variables "STACK_NAME=$STACK_NAME,AWS_REGION=$REGION,S3_BUCKET=$S3_BUCKET,BEDROCK_MODEL_ID=$MODEL_ID" \
+            --environment-variables "STACK_NAME=$STACK_NAME,AWS_REGION=$REGION,S3_BUCKET=$S3_BUCKET,BEDROCK_MODEL_ID=$MODEL_ID,GATEWAY_TOKEN_SECRET_ID=$GATEWAY_SECRET_ARN,S3_USER_FILES_BUCKET=$S3_BUCKET,EXECUTION_ROLE_ARN=$EXECUTION_ROLE_ARN" \
             --region $REGION \
             --query 'agentRuntimeId' --output text)
           echo "AgentCore Runtime created: $RUNTIME_ID"
@@ -512,7 +532,7 @@ Resources:
             --region $REGION
 
           # ── Gateway token + openclaw.json ─────────────────────────────────
-          GATEWAY_TOKEN=$(openssl rand -hex 32)
+          GATEWAY_TOKEN=$(aws secretsmanager get-secret-value --secret-id "$GATEWAY_SECRET_ARN" --query SecretString --output text --region $REGION)
           aws ssm put-parameter --name "/openclaw/$STACK_NAME/gateway-token" --value "$GATEWAY_TOKEN" --type SecureString --overwrite --region $REGION
           mkdir -p /home/ubuntu/.openclaw
           jq -n --arg token "$GATEWAY_TOKEN" --arg region "$REGION" --arg model "$MODEL_ID" \
@@ -624,3 +644,9 @@ Outputs:
   SetupLog:
     Value: !Sub "ssh ubuntu@${GatewayInstance.PublicIp} tail -f /var/log/openclaw-setup.log"
     Description: Command to tail setup log
+
+  GatewayFullURL:
+    Value: !GetAtt WaitCondition.Data
+    Description: >
+      Full gateway URL with token (JSON — copy the URL value).
+      Format: {"openclaw":"http://IP:18789/?token=TOKEN"}
